@@ -173,16 +173,8 @@ public class FrontServlet extends HttpServlet {
 
                     // Si la méthode retourne un ModelView, dispatcher vers la vue
                     if (result instanceof ModelView) {
-                        ModelView modelView = (ModelView) result;
-                        String view = modelView.getView();
+                        String view = ((ModelView) result).getView();
                         if (view != null && !view.isEmpty()) {
-                            // Passer les données du ModelView vers la requête
-                            Map<String, Object> data = modelView.getData();
-                            if (data != null) {
-                                for (Map.Entry<String, Object> entry : data.entrySet()) {
-                                    req.setAttribute(entry.getKey(), entry.getValue());
-                                }
-                            }
                             RequestDispatcher rd = req.getRequestDispatcher(view);
                             rd.forward(req, resp);
                             return;
