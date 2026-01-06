@@ -172,7 +172,7 @@ public class FrontServlet extends HttpServlet {
                         
                         for (int i = 0; i < paramTypes.length; i++) {
                             Class<?> paramType = paramTypes[i];
-                            java.lang.reflect.Parameter parameter = parameters[i];
+                            String paramName = parameters[i].getName();
                             
                             // Ignorer Map, List, tableaux - traités séparément
                             if (Map.class.isAssignableFrom(paramType) || 
@@ -182,15 +182,6 @@ public class FrontServlet extends HttpServlet {
                                     args[i] = urlParams; // Passer les paramètres d'URL
                                 }
                                 continue;
-                            }
-                            
-                            // Déterminer le nom du paramètre : @RequestParam.value() ou nom du paramètre
-                            String paramName;
-                            if (parameter.isAnnotationPresent(RequestParam.class)) {
-                                RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
-                                paramName = reqParam.value();
-                            } else {
-                                paramName = parameter.getName();
                             }
                             
                             // Chercher la valeur : d'abord dans urlParams, puis dans request params
