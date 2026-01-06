@@ -2,6 +2,12 @@ package servlet;
 
 import javax.servlet.*;
 import javax.servlet.http.*;
+import javax.servlet.annotation.MultipartConfig;
+
+import java.io.InputStream;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.rmi.ServerException;
@@ -10,17 +16,22 @@ import java.lang.reflect.Modifier;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import modelview.ModelView;
 import annotation.MethodeAnnotation;
 import annotation.RequestParam;
+import annotation.Api;
+import util.JsonUtil;
 import java.util.Set;
 import scan.ClassPathScanner;
 import scan.UrlMatcher;
+import upload.FileUpload;
  
 
  
 
+@MultipartConfig(fileSizeThreshold=0, maxFileSize=10485760, maxRequestSize=10485760)
 public class FrontServlet extends HttpServlet {
     // clé de contexte pour stocker les classes annotées
     public static final String ATTR_ANNOTATED_CLASSES = "annotatedClasses";
@@ -160,10 +171,77 @@ public class FrontServlet extends HttpServlet {
             }
         }
 
-        resp.setContentType("text/html;charset=UTF-8");
+        boolean apiEnabled = (selectedRoute != null) && (selectedRoute.method.isAnnotationPresent(annotation.Api.class) || selectedRoute.cls.isAnnotationPresent(annotation.Api.class));
         try (PrintWriter out = resp.getWriter()) {
-            out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
             if (selectedRoute != null) {
+                // If request is multipart, read uploaded parts into map for binding
+                Map<String, java.util.List<FileUpload>> uploadedFiles = new HashMap<>();
+                boolean isMultipart = req.getContentType() != null && req.getContentType().toLowerCase().startsWith("multipart/");
+                if (isMultipart) {
+                    try {
+                        Collection<Part> parts = req.getParts();
+                        // String uploadsRel = "/uploads";
+                        String uploadsPath = "C:\\Users\\Mir\\Desktop\\ITU\\Info\\FrameworkMrVahatra\\Test_FrameWrok_Mr_Vahatra\\upload";
+                        if (uploadsPath != null) {
+                            File updir = new File(uploadsPath);
+                            if (!updir.exists()) updir.mkdirs();
+                        }
+                        long maxSize = 10L * 1024L * 1024L; // 10MB
+                        for (Part p : parts) {
+                            String field = p.getName();
+                            String submitted = p.getSubmittedFileName();
+                            if (submitted == null) continue; // not a file part
+                            long size = p.getSize();
+                            if (size > maxSize) {
+                                // size too large
+                                if (apiEnabled) {
+                                    resp.setStatus(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                                    Map<String, Object> err = new HashMap<>();
+                                    err.put("status", "error");
+                                    err.put("code", HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                                    Map<String, Object> data = new HashMap<>();
+                                    data.put("message", "Fichier trop volumineux (max 10MB)");
+                                    err.put("data", data);
+                                    resp.setContentType("application/json;charset=UTF-8");
+                                    out.print(JsonUtil.toJson(err));
+                                    return;
+                                } else {
+                                    resp.setStatus(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                                    resp.setContentType("text/html;charset=UTF-8");
+                                    out.println("<h2>413 - Fichier trop volumineux</h2>");
+                                    return;
+                                }
+                            }
+                            byte[] content = null;
+                            try (InputStream is = p.getInputStream()) {
+                                content = is.readAllBytes();
+                            }
+                            FileUpload fu = new FileUpload(content, submitted, p.getContentType(), size);
+                            // save to uploads/ if possible (overwrite existing)
+                            try {
+                                if (uploadsPath != null) {
+                                    File target = new File(uploadsPath, submitted);
+                                    Files.write(target.toPath(), content);
+                                    fu.setSavedPath(target.getAbsolutePath());
+                                } else {
+                                    // when getRealPath returns null, try to save relative to user.dir/uploads
+                                    File altDir = new File(System.getProperty("user.dir"), "uploads");
+                                    if (!altDir.exists()) altDir.mkdirs();
+                                    File target = new File(altDir, submitted);
+                                    Files.write(target.toPath(), content);
+                                    fu.setSavedPath(target.getAbsolutePath());
+                                }
+                            } catch (Throwable t) {
+                                // log saving errors for diagnosis and keep savedPath null
+                                System.out.println("[upload] failed to save file '" + submitted + "' -> " + t);
+                                fu.setSavedPath(null);
+                            }
+                            uploadedFiles.computeIfAbsent(field, k -> new ArrayList<>()).add(fu);
+                        }
+                    } catch (Throwable t) {
+                        // ignore multipart parsing errors for now
+                    }
+                }
                 try {
                     Method foundMethodRef = selectedRoute.method;
                     Class<?> foundClassRef = selectedRoute.cls;
@@ -183,10 +261,15 @@ public class FrontServlet extends HttpServlet {
                         for (int i = 0; i < paramTypes.length; i++) {
                             Class<?> paramType = paramTypes[i];
                             java.lang.reflect.Parameter parameter = parameters[i];
-                            // Si Map<String, Object> attendu, construire à partir des paramètres du formulaire
+                            String paramNameForFile = null;
+                            if (parameter.isAnnotationPresent(RequestParam.class)) {
+                                paramNameForFile = parameter.getAnnotation(RequestParam.class).value();
+                            } else {
+                                paramNameForFile = parameter.getName();
+                            }
+                            // Map<String, Object> (formulaire complet)
                             if (Map.class.isAssignableFrom(paramType)) {
                                 Map<String, Object> paramMap = new HashMap<>();
-                                // Ajoute tous les paramètres du formulaire (name/value)
                                 Map<String, String[]> paramValues = req.getParameterMap();
                                 for (Map.Entry<String, String[]> entry : paramValues.entrySet()) {
                                     String key = entry.getKey();
@@ -201,25 +284,68 @@ public class FrontServlet extends HttpServlet {
                                 continue;
                             }
                             if (List.class.isAssignableFrom(paramType) || paramType.isArray()) {
+                                // Try to bind file lists/arrays if multipart
+                                if (isMultipart) {
+                                    // Array of FileUpload
+                                    if (paramType.isArray() && paramType.getComponentType() == FileUpload.class) {
+                                        java.util.List<FileUpload> lst = uploadedFiles.get(paramNameForFile);
+                                        if (lst == null) lst = new ArrayList<>();
+                                        FileUpload[] arr = lst.toArray(new FileUpload[0]);
+                                        args[i] = arr;
+                                        continue;
+                                    }
+                                    // List<FileUpload>
+                                    if (List.class.isAssignableFrom(paramType)) {
+                                        java.util.List<FileUpload> lst = uploadedFiles.get(paramNameForFile);
+                                        if (lst == null) lst = new ArrayList<>();
+                                        args[i] = lst;
+                                        continue;
+                                    }
+                                }
+                                // fallback: skip binding for other lists/arrays
                                 continue;
                             }
-                            String paramName;
-                            if (parameter.isAnnotationPresent(RequestParam.class)) {
-                                RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
-                                paramName = reqParam.value();
-                            } else {
-                                paramName = parameter.getName();
+                            // Type simple (String, int, ...)
+                            if (isSimpleType(paramType)) {
+                                String paramName;
+                                if (parameter.isAnnotationPresent(RequestParam.class)) {
+                                    RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
+                                    paramName = reqParam.value();
+                                } else {
+                                    paramName = parameter.getName();
+                                }
+                                String value = null;
+                                if (urlParams != null && urlParams.containsKey(paramName)) {
+                                    value = urlParams.get(paramName);
+                                }
+                                if (value == null || value.isEmpty()) {
+                                    value = req.getParameter(paramName);
+                                }
+                                if (value == null || value.isEmpty()) {
+                                    throw new IllegalArgumentException("Paramètre obligatoire manquant: " + paramName);
+                                }
+                                try {
+                                    args[i] = convertParameter(value, paramType);
+                                } catch (Exception e) {
+                                    throw new IllegalArgumentException("Impossible de convertir le paramètre '" + paramName + "' (valeur: '" + value + "') en type " + paramType.getSimpleName(), e);
+                                }
+                                continue;
                             }
-                            String value = null;
-                            if (urlParams != null && urlParams.containsKey(paramName)) {
-                                value = urlParams.get(paramName);
-                            }
-                            if (value == null || value.isEmpty()) {
-                                value = req.getParameter(paramName);
-                            }
-                            if (value == null || value.isEmpty()) {
-                                throw new IllegalArgumentException("Paramètre obligatoire manquant: " + paramName);
-                            }
+                                // File binding: byte[] or FileUpload
+                                if (isMultipart && (paramType == byte[].class || paramType == FileUpload.class)) {
+                                    java.util.List<FileUpload> lst = uploadedFiles.get(paramNameForFile);
+                                    if (lst == null || lst.isEmpty()) {
+                                        throw new IllegalArgumentException("Fichier manquant: " + paramNameForFile);
+                                    }
+                                    FileUpload first = lst.get(0);
+                                    if (paramType == byte[].class) {
+                                        args[i] = first.getContent();
+                                    } else {
+                                        args[i] = first;
+                                    }
+                                    continue;
+                                }
+                            // Objet complexe : construction automatique
                             try {
                                 args[i] = buildObjectFromRequest(paramType, parameter, req, "");
                             } catch (Exception e) {
@@ -228,6 +354,27 @@ public class FrontServlet extends HttpServlet {
                         }
                         result = foundMethodRef.invoke(target, args);
                     }
+
+                    if (apiEnabled) {
+                        Map<String, Object> envelope = new HashMap<>();
+                        envelope.put("status", "success");
+                        envelope.put("code", HttpServletResponse.SC_OK);
+                        Object dataObj = null;
+                        if (result instanceof ModelView) {
+                            ModelView modelView = (ModelView) result;
+                            dataObj = modelView.getData() != null ? modelView.getData() : new HashMap<>();
+                        } else if (result == null) {
+                            dataObj = new HashMap<>();
+                        } else {
+                            dataObj = result;
+                        }
+                        envelope.put("data", dataObj);
+                        resp.setContentType("application/json;charset=UTF-8");
+                        out.print(JsonUtil.toJson(envelope));
+                        return;
+                    }
+
+                    // Non-API behavior: keep HTML rendering as before
                     if (result instanceof ModelView) {
                         ModelView modelView = (ModelView) result;
                         String view = modelView.getView();
@@ -243,27 +390,72 @@ public class FrontServlet extends HttpServlet {
                             return;
                         }
                     } else if (result instanceof String) {
+                        resp.setContentType("text/html;charset=UTF-8");
+                        out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
                         out.println("<h2>Résultat</h2>");
                         out.println("<p>" + (String) result + "</p>");
+                        out.println("</body></html>");
+                        return;
                     } else {
+                        resp.setContentType("text/html;charset=UTF-8");
+                        out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
                         out.println("<h2>Route trouvée</h2>");
                         out.println("<p>Classe: " + foundClassRef.getName() + "</p>");
                         out.println("<p>Méthode: " + foundMethodRef.getName() + "</p>");
+                        out.println("</body></html>");
+                        return;
                     }
                 } catch (IllegalArgumentException argError) {
-                    resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-                    out.println("<h2>400 - Paramètre invalide</h2>");
-                    out.println("<p>" + argError.getMessage() + "</p>");
+                    if (apiEnabled) {
+                        resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                        Map<String, Object> err = new HashMap<>();
+                        err.put("status", "error");
+                        err.put("code", HttpServletResponse.SC_BAD_REQUEST);
+                        Map<String, Object> data = new HashMap<>();
+                        data.put("message", argError.getMessage());
+                        err.put("data", data);
+                        resp.setContentType("application/json;charset=UTF-8");
+                        out.print(JsonUtil.toJson(err));
+                        return;
+                    } else {
+                        resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                        resp.setContentType("text/html;charset=UTF-8");
+                        out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
+                        out.println("<h2>400 - Paramètre invalide</h2>");
+                        out.println("<p>" + argError.getMessage() + "</p>");
+                        out.println("</body></html>");
+                        return;
+                    }
                 } catch (Throwable invokeError) {
-                    resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-                    out.println("<h2>500 - Erreur invocation</h2>");
-                    out.println("<pre>" + invokeError + "</pre>");
+                    if (apiEnabled) {
+                        resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                        Map<String, Object> err = new HashMap<>();
+                        err.put("status", "error");
+                        err.put("code", HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                        Map<String, Object> data = new HashMap<>();
+                        data.put("message", String.valueOf(invokeError));
+                        err.put("data", data);
+                        resp.setContentType("application/json;charset=UTF-8");
+                        out.print(JsonUtil.toJson(err));
+                        return;
+                    } else {
+                        resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                        resp.setContentType("text/html;charset=UTF-8");
+                        out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
+                        out.println("<h2>500 - Erreur invocation</h2>");
+                        out.println("<pre>" + invokeError + "</pre>");
+                        out.println("</body></html>");
+                        return;
+                    }
                 }
             } else {
                 resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
+                resp.setContentType("text/html;charset=UTF-8");
+                out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
                 out.println("<h2>404 - Not found</h2>");
+                out.println("</body></html>");
+                return;
             }
-            out.println("</body></html>");
         }
     }
 
