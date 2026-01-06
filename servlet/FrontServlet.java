@@ -261,12 +261,6 @@ public class FrontServlet extends HttpServlet {
                         for (int i = 0; i < paramTypes.length; i++) {
                             Class<?> paramType = paramTypes[i];
                             java.lang.reflect.Parameter parameter = parameters[i];
-                            String paramNameForFile = null;
-                            if (parameter.isAnnotationPresent(RequestParam.class)) {
-                                paramNameForFile = parameter.getAnnotation(RequestParam.class).value();
-                            } else {
-                                paramNameForFile = parameter.getName();
-                            }
                             // Map<String, Object> (formulaire complet)
                             if (Map.class.isAssignableFrom(paramType)) {
                                 Map<String, Object> paramMap = new HashMap<>();
@@ -331,20 +325,6 @@ public class FrontServlet extends HttpServlet {
                                 }
                                 continue;
                             }
-                                // File binding: byte[] or FileUpload
-                                if (isMultipart && (paramType == byte[].class || paramType == FileUpload.class)) {
-                                    java.util.List<FileUpload> lst = uploadedFiles.get(paramNameForFile);
-                                    if (lst == null || lst.isEmpty()) {
-                                        throw new IllegalArgumentException("Fichier manquant: " + paramNameForFile);
-                                    }
-                                    FileUpload first = lst.get(0);
-                                    if (paramType == byte[].class) {
-                                        args[i] = first.getContent();
-                                    } else {
-                                        args[i] = first;
-                                    }
-                                    continue;
-                                }
                             // Objet complexe : construction automatique
                             try {
                                 args[i] = buildObjectFromRequest(paramType, parameter, req, "");
