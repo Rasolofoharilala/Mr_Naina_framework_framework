@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import modelview.ModelView;
 import annotation.MethodeAnnotation;
+import annotation.RequestParam;
 import java.util.Set;
 import scan.ClassPathScanner;
 import scan.UrlMatcher;
@@ -163,18 +164,71 @@ public class FrontServlet extends HttpServlet {
                     Object result = null;
                     if (foundMethodRef.getParameterCount() == 0) {
                         result = foundMethodRef.invoke(target);
-                    } else if (foundMethodRef.getParameterCount() == 1) {
-                        Class<?> paramType = foundMethodRef.getParameterTypes()[0];
-                        if (Map.class.isAssignableFrom(paramType)) {
-                            // Passer les paramètres d'URL extraits
-                            result = foundMethodRef.invoke(target, urlParams);
+                    } else {
+                        // Préparer les arguments pour l'invocation
+                        Class<?>[] paramTypes = foundMethodRef.getParameterTypes();
+                        java.lang.reflect.Parameter[] parameters = foundMethodRef.getParameters();
+                        Object[] args = new Object[paramTypes.length];
+                        
+                        for (int i = 0; i < paramTypes.length; i++) {
+                            Class<?> paramType = paramTypes[i];
+                            java.lang.reflect.Parameter parameter = parameters[i];
+                            
+                            // Ignorer Map, List, tableaux - traités séparément
+                            if (Map.class.isAssignableFrom(paramType) || 
+                                List.class.isAssignableFrom(paramType) || 
+                                paramType.isArray()) {
+                                if (Map.class.isAssignableFrom(paramType)) {
+                                    args[i] = urlParams; // Passer les paramètres d'URL
+                                }
+                                continue;
+                            }
+                            
+                            // Déterminer le nom du paramètre : @RequestParam.value() ou nom du paramètre
+                            String paramName;
+                            if (parameter.isAnnotationPresent(RequestParam.class)) {
+                                RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
+                                paramName = reqParam.value();
+                            } else {
+                                paramName = parameter.getName();
+                            }
+                            
+                            // Chercher la valeur : d'abord dans urlParams, puis dans request params
+                            String value = null;
+                            if (urlParams != null && urlParams.containsKey(paramName)) {
+                                value = urlParams.get(paramName);
+                            } else {
+                                value = req.getParameter(paramName);
+                            }
+                            
+                            // Vérifier si le paramètre est obligatoire
+                            if (value == null || value.isEmpty()) {
+                                throw new IllegalArgumentException("Paramètre obligatoire manquant: " + paramName);
+                            }
+                            
+                            // Conversion de type
+                            try {
+                                args[i] = convertParameter(value, paramType);
+                            } catch (Exception e) {
+                                throw new IllegalArgumentException("Impossible de convertir le paramètre '" + paramName + "' (valeur: '" + value + "') en type " + paramType.getSimpleName(), e);
+                            }
                         }
+                        
+                        result = foundMethodRef.invoke(target, args);
                     }
 
                     // Si la méthode retourne un ModelView, dispatcher vers la vue
                     if (result instanceof ModelView) {
-                        String view = ((ModelView) result).getView();
+                        ModelView modelView = (ModelView) result;
+                        String view = modelView.getView();
                         if (view != null && !view.isEmpty()) {
+                            // Passer les données du ModelView vers la requête
+                            Map<String, Object> data = modelView.getData();
+                            if (data != null) {
+                                for (Map.Entry<String, Object> entry : data.entrySet()) {
+                                    req.setAttribute(entry.getKey(), entry.getValue());
+                                }
+                            }
                             RequestDispatcher rd = req.getRequestDispatcher(view);
                             rd.forward(req, resp);
                             return;
@@ -188,6 +242,11 @@ public class FrontServlet extends HttpServlet {
                         out.println("<p>Classe: " + foundClassRef.getName() + "</p>");
                         out.println("<p>Méthode: " + foundMethodRef.getName() + "</p>");
                     }
+                } catch (IllegalArgumentException argError) {
+                    // Erreur de paramètre manquant ou invalide (400 Bad Request)
+                    resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                    out.println("<h2>400 - Paramètre invalide</h2>");
+                    out.println("<p>" + argError.getMessage() + "</p>");
                 } catch (Throwable invokeError) {
                     resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
                     out.println("<h2>500 - Erreur invocation</h2>");
@@ -205,6 +264,30 @@ public class FrontServlet extends HttpServlet {
         RequestDispatcher defaultDispatcher = getServletContext().getNamedDispatcher("default");
         defaultDispatcher.forward(req, resp);
 
+    }
+    
+    /**
+     * Convertit une valeur String vers le type cible
+     */
+    private Object convertParameter(String value, Class<?> targetType) {
+        if (targetType == String.class) {
+            return value;
+        } else if (targetType == int.class || targetType == Integer.class) {
+            return Integer.parseInt(value);
+        } else if (targetType == long.class || targetType == Long.class) {
+            return Long.parseLong(value);
+        } else if (targetType == double.class || targetType == Double.class) {
+            return Double.parseDouble(value);
+        } else if (targetType == float.class || targetType == Float.class) {
+            return Float.parseFloat(value);
+        } else if (targetType == boolean.class || targetType == Boolean.class) {
+            return Boolean.parseBoolean(value);
+        } else if (targetType == short.class || targetType == Short.class) {
+            return Short.parseShort(value);
+        } else if (targetType == byte.class || targetType == Byte.class) {
+            return Byte.parseByte(value);
+        }
+        throw new IllegalArgumentException("Type non supporté: " + targetType.getName());
     }
     
     // Classe interne pour stocker les informations de route
