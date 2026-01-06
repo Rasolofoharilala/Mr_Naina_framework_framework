@@ -85,7 +85,8 @@ public class FrontServlet extends HttpServlet {
         String path = (checkParam != null && !checkParam.isEmpty()) ? checkParam : req.getRequestURI().substring(req.getContextPath().length());
 
         Object o = getServletContext().getAttribute(ATTR_ANNOTATED_CLASSES);
-        List<RouteInfo> matchingRoutes = new ArrayList<>();
+        List<RouteInfo> exactRoutes = new ArrayList<>();
+        List<RouteInfo> dynamicRoutes = new ArrayList<>();
         Map<String, String> urlParams = null;
 
         if (o instanceof Set) {
@@ -97,30 +98,45 @@ public class FrontServlet extends HttpServlet {
                         if (m.isAnnotationPresent(annotation.MethodeAnnotation.class)) {
                             annotation.MethodeAnnotation ma = m.getAnnotation(annotation.MethodeAnnotation.class);
                             String url = ma.value();
-                            // Par défaut, route ALL
                             List<RouteInfo> routesForMethod = new ArrayList<>();
                             routesForMethod.add(new RouteInfo(cls, m, url, "ALL"));
-                            // Si GetMapping, ajoute GET
                             if (m.isAnnotationPresent(annotation.GetMapping.class)) {
                                 routesForMethod.add(new RouteInfo(cls, m, url, "GET"));
                             }
-                            // Si PostMapping, ajoute POST
                             if (m.isAnnotationPresent(annotation.PostMapping.class)) {
                                 routesForMethod.add(new RouteInfo(cls, m, url, "POST"));
                             }
-                            // Ajoute toutes les routes pour cette méthode
                             for (RouteInfo route : routesForMethod) {
-                                UrlMatcher matcher = new UrlMatcher(route.urlPattern);
-                                Map<String, String> params = matcher.extractParams(path);
-                                if (params != null) {
-                                    matchingRoutes.add(new RouteInfo(route.cls, route.method, route.urlPattern, route.httpMethod));
-                                    urlParams = params;
+                                if (!route.urlPattern.contains("{")) {
+                                    exactRoutes.add(route);
+                                } else {
+                                    dynamicRoutes.add(route);
                                 }
                             }
                         }
                     }
                 } catch (Throwable t) {
                     // ignore problematic classes/methods
+                }
+            }
+        }
+
+        // D'abord, chercher une route exacte
+        List<RouteInfo> matchingRoutes = new ArrayList<>();
+        for (RouteInfo route : exactRoutes) {
+            if (route.urlPattern.equals(path)) {
+                matchingRoutes.add(route);
+                urlParams = new HashMap<>();
+            }
+        }
+        // Si aucune route exacte, chercher une route dynamique
+        if (matchingRoutes.isEmpty()) {
+            for (RouteInfo route : dynamicRoutes) {
+                UrlMatcher matcher = new UrlMatcher(route.urlPattern);
+                Map<String, String> params = matcher.extractParams(path);
+                if (params != null) {
+                    matchingRoutes.add(route);
+                    urlParams = params;
                 }
             }
         }
@@ -167,18 +183,26 @@ public class FrontServlet extends HttpServlet {
                         for (int i = 0; i < paramTypes.length; i++) {
                             Class<?> paramType = paramTypes[i];
                             java.lang.reflect.Parameter parameter = parameters[i];
-                            
-                            // Ignorer Map, List, tableaux - traités séparément
-                            if (Map.class.isAssignableFrom(paramType) || 
-                                List.class.isAssignableFrom(paramType) || 
-                                paramType.isArray()) {
-                                if (Map.class.isAssignableFrom(paramType)) {
-                                    args[i] = urlParams;
+                            // Si Map<String, Object> attendu, construire à partir des paramètres du formulaire
+                            if (Map.class.isAssignableFrom(paramType)) {
+                                Map<String, Object> paramMap = new HashMap<>();
+                                // Ajoute tous les paramètres du formulaire (name/value)
+                                Map<String, String[]> paramValues = req.getParameterMap();
+                                for (Map.Entry<String, String[]> entry : paramValues.entrySet()) {
+                                    String key = entry.getKey();
+                                    String[] vals = entry.getValue();
+                                    if (vals != null && vals.length == 1) {
+                                        paramMap.put(key, vals[0]);
+                                    } else {
+                                        paramMap.put(key, vals);
+                                    }
                                 }
+                                args[i] = paramMap;
                                 continue;
                             }
-                            
-                            // Déterminer le nom du paramètre : @RequestParam.value() ou nom du paramètre
+                            if (List.class.isAssignableFrom(paramType) || paramType.isArray()) {
+                                continue;
+                            }
                             String paramName;
                             if (parameter.isAnnotationPresent(RequestParam.class)) {
                                 RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
@@ -186,16 +210,11 @@ public class FrontServlet extends HttpServlet {
                             } else {
                                 paramName = parameter.getName();
                             }
-                            
-                            // Chercher la valeur : d'abord dans urlParams, puis dans request params
                             String value = null;
                             if (urlParams != null && urlParams.containsKey(paramName)) {
-                                // Paramètre extrait de l'URL (ex: /etudiant/{id} -> id=5)
                                 value = urlParams.get(paramName);
                             }
-                            
                             if (value == null || value.isEmpty()) {
-                                // Sinon, chercher dans les paramètres de la requête (POST/GET)
                                 value = req.getParameter(paramName);
                             }
                             if (value == null || value.isEmpty()) {
