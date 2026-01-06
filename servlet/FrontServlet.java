@@ -172,7 +172,7 @@ public class FrontServlet extends HttpServlet {
                         
                         for (int i = 0; i < paramTypes.length; i++) {
                             Class<?> paramType = paramTypes[i];
-                            String paramName = parameters[i].getName();
+                            java.lang.reflect.Parameter parameter = parameters[i];
                             
                             // Ignorer Map, List, tableaux - traités séparément
                             if (Map.class.isAssignableFrom(paramType) || 
@@ -184,11 +184,24 @@ public class FrontServlet extends HttpServlet {
                                 continue;
                             }
                             
+                            // Déterminer le nom du paramètre : @RequestParam.value() ou nom du paramètre
+                            String paramName;
+                            if (parameter.isAnnotationPresent(RequestParam.class)) {
+                                RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
+                                paramName = reqParam.value();
+                            } else {
+                                paramName = parameter.getName();
+                            }
+                            
                             // Chercher la valeur : d'abord dans urlParams, puis dans request params
                             String value = null;
                             if (urlParams != null && urlParams.containsKey(paramName)) {
+                                // Paramètre extrait de l'URL (ex: /etudiant/{id} -> id=5)
                                 value = urlParams.get(paramName);
-                            } else {
+                            }
+                            
+                            if (value == null || value.isEmpty()) {
+                                // Sinon, chercher dans les paramètres de la requête (POST/GET)
                                 value = req.getParameter(paramName);
                             }
                             
