@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.rmi.ServerException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import annotation.MethodeAnnotation;
 import java.util.Set;
 import scan.ClassPathScanner;
@@ -81,8 +80,8 @@ public class FrontServlet extends HttpServlet {
 
         Object o = getServletContext().getAttribute(ATTR_ANNOTATED_CLASSES);
         boolean found = false;
-        Class<?> foundClassRef = null;
-        Method foundMethodRef = null;
+        String foundClass = null;
+        String foundMethod = null;
 
         if (o instanceof Set) {
             @SuppressWarnings("unchecked")
@@ -95,8 +94,8 @@ public class FrontServlet extends HttpServlet {
                             String url = ma.value();
                             if (url != null && url.equals(path)) {
                                 found = true;
-                                foundClassRef = cls;
-                                foundMethodRef = m;
+                                foundClass = cls.getName();
+                                foundMethod = m.getName();
                                 break;
                             }
                         }
@@ -111,39 +110,10 @@ public class FrontServlet extends HttpServlet {
         resp.setContentType("text/html;charset=UTF-8");
         try (PrintWriter out = resp.getWriter()) {
             out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
-            if (found && foundClassRef != null && foundMethodRef != null) {
-                // Tenter d'invoquer la méthode trouvée
-                try {
-                    foundMethodRef.setAccessible(true);
-                    Object target = null;
-                    if (!Modifier.isStatic(foundMethodRef.getModifiers())) {
-                        // créer une instance via constructeur sans argument
-                        target = foundClassRef.getDeclaredConstructor().newInstance();
-                    }
-
-                    Object result = null;
-                    if (foundMethodRef.getParameterCount() == 0) {
-                        result = foundMethodRef.invoke(target);
-                    } else {
-                        // Pas de support des paramètres pour l'instant
-                        // Vous pouvez étendre ici pour passer req/resp si souhaité
-                    }
-
-                    // Afficher le résultat si c'est une String
-                    if (result instanceof String) {
-                        out.println("<h2>Résultat</h2>");
-                        out.println("<p>" + (String) result + "</p>");
-                    } else {
-                        // fallback: infos de la méthode
-                        out.println("<h2>Route trouvée</h2>");
-                        out.println("<p>Classe: " + foundClassRef.getName() + "</p>");
-                        out.println("<p>Méthode: " + foundMethodRef.getName() + "</p>");
-                    }
-                } catch (Throwable invokeError) {
-                    resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-                    out.println("<h2>500 - Erreur invocation</h2>");
-                    out.println("<pre>" + invokeError + "</pre>");
-                }
+            if (found) {
+                out.println("<h2>Route trouvée</h2>");
+                out.println("<p>Classe: " + foundClass + "</p>");
+                out.println("<p>Méthode: " + foundMethod + "</p>");
             } else {
                 resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 out.println("<h2>404 - Not found</h2>");
