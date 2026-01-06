@@ -2,6 +2,12 @@ package servlet;
 
 import javax.servlet.*;
 import javax.servlet.http.*;
+import javax.servlet.annotation.MultipartConfig;
+
+import java.io.InputStream;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.rmi.ServerException;
@@ -10,6 +16,7 @@ import java.lang.reflect.Modifier;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import modelview.ModelView;
 import annotation.MethodeAnnotation;
@@ -19,10 +26,12 @@ import util.JsonUtil;
 import java.util.Set;
 import scan.ClassPathScanner;
 import scan.UrlMatcher;
+import upload.FileUpload;
  
 
  
 
+@MultipartConfig(fileSizeThreshold=0, maxFileSize=10485760, maxRequestSize=10485760)
 public class FrontServlet extends HttpServlet {
     // clé de contexte pour stocker les classes annotées
     public static final String ATTR_ANNOTATED_CLASSES = "annotatedClasses";
@@ -165,6 +174,74 @@ public class FrontServlet extends HttpServlet {
         boolean apiEnabled = (selectedRoute != null) && (selectedRoute.method.isAnnotationPresent(annotation.Api.class) || selectedRoute.cls.isAnnotationPresent(annotation.Api.class));
         try (PrintWriter out = resp.getWriter()) {
             if (selectedRoute != null) {
+                // If request is multipart, read uploaded parts into map for binding
+                Map<String, java.util.List<FileUpload>> uploadedFiles = new HashMap<>();
+                boolean isMultipart = req.getContentType() != null && req.getContentType().toLowerCase().startsWith("multipart/");
+                if (isMultipart) {
+                    try {
+                        Collection<Part> parts = req.getParts();
+                        // String uploadsRel = "/uploads";
+                        String uploadsPath = "C:\\Users\\Mir\\Desktop\\ITU\\Info\\FrameworkMrVahatra\\Test_FrameWrok_Mr_Vahatra\\upload";
+                        if (uploadsPath != null) {
+                            File updir = new File(uploadsPath);
+                            if (!updir.exists()) updir.mkdirs();
+                        }
+                        long maxSize = 10L * 1024L * 1024L; // 10MB
+                        for (Part p : parts) {
+                            String field = p.getName();
+                            String submitted = p.getSubmittedFileName();
+                            if (submitted == null) continue; // not a file part
+                            long size = p.getSize();
+                            if (size > maxSize) {
+                                // size too large
+                                if (apiEnabled) {
+                                    resp.setStatus(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                                    Map<String, Object> err = new HashMap<>();
+                                    err.put("status", "error");
+                                    err.put("code", HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                                    Map<String, Object> data = new HashMap<>();
+                                    data.put("message", "Fichier trop volumineux (max 10MB)");
+                                    err.put("data", data);
+                                    resp.setContentType("application/json;charset=UTF-8");
+                                    out.print(JsonUtil.toJson(err));
+                                    return;
+                                } else {
+                                    resp.setStatus(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                                    resp.setContentType("text/html;charset=UTF-8");
+                                    out.println("<h2>413 - Fichier trop volumineux</h2>");
+                                    return;
+                                }
+                            }
+                            byte[] content = null;
+                            try (InputStream is = p.getInputStream()) {
+                                content = is.readAllBytes();
+                            }
+                            FileUpload fu = new FileUpload(content, submitted, p.getContentType(), size);
+                            // save to uploads/ if possible (overwrite existing)
+                            try {
+                                if (uploadsPath != null) {
+                                    File target = new File(uploadsPath, submitted);
+                                    Files.write(target.toPath(), content);
+                                    fu.setSavedPath(target.getAbsolutePath());
+                                } else {
+                                    // when getRealPath returns null, try to save relative to user.dir/uploads
+                                    File altDir = new File(System.getProperty("user.dir"), "uploads");
+                                    if (!altDir.exists()) altDir.mkdirs();
+                                    File target = new File(altDir, submitted);
+                                    Files.write(target.toPath(), content);
+                                    fu.setSavedPath(target.getAbsolutePath());
+                                }
+                            } catch (Throwable t) {
+                                // log saving errors for diagnosis and keep savedPath null
+                                System.out.println("[upload] failed to save file '" + submitted + "' -> " + t);
+                                fu.setSavedPath(null);
+                            }
+                            uploadedFiles.computeIfAbsent(field, k -> new ArrayList<>()).add(fu);
+                        }
+                    } catch (Throwable t) {
+                        // ignore multipart parsing errors for now
+                    }
+                }
                 try {
                     Method foundMethodRef = selectedRoute.method;
                     Class<?> foundClassRef = selectedRoute.cls;
@@ -201,6 +278,25 @@ public class FrontServlet extends HttpServlet {
                                 continue;
                             }
                             if (List.class.isAssignableFrom(paramType) || paramType.isArray()) {
+                                // Try to bind file lists/arrays if multipart
+                                if (isMultipart) {
+                                    // Array of FileUpload
+                                    if (paramType.isArray() && paramType.getComponentType() == FileUpload.class) {
+                                        java.util.List<FileUpload> lst = uploadedFiles.get(paramNameForFile);
+                                        if (lst == null) lst = new ArrayList<>();
+                                        FileUpload[] arr = lst.toArray(new FileUpload[0]);
+                                        args[i] = arr;
+                                        continue;
+                                    }
+                                    // List<FileUpload>
+                                    if (List.class.isAssignableFrom(paramType)) {
+                                        java.util.List<FileUpload> lst = uploadedFiles.get(paramNameForFile);
+                                        if (lst == null) lst = new ArrayList<>();
+                                        args[i] = lst;
+                                        continue;
+                                    }
+                                }
+                                // fallback: skip binding for other lists/arrays
                                 continue;
                             }
                             // Type simple (String, int, ...)
