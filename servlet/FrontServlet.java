@@ -203,36 +203,23 @@ public class FrontServlet extends HttpServlet {
                             if (List.class.isAssignableFrom(paramType) || paramType.isArray()) {
                                 continue;
                             }
-                            if (List.class.isAssignableFrom(paramType) || paramType.isArray()) {
-                                continue;
+                            String paramName;
+                            if (parameter.isAnnotationPresent(RequestParam.class)) {
+                                RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
+                                paramName = reqParam.value();
+                            } else {
+                                paramName = parameter.getName();
                             }
-                            // Type simple (String, int, ...)
-                            if (isSimpleType(paramType)) {
-                                String paramName;
-                                if (parameter.isAnnotationPresent(RequestParam.class)) {
-                                    RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
-                                    paramName = reqParam.value();
-                                } else {
-                                    paramName = parameter.getName();
-                                }
-                                String value = null;
-                                if (urlParams != null && urlParams.containsKey(paramName)) {
-                                    value = urlParams.get(paramName);
-                                }
-                                if (value == null || value.isEmpty()) {
-                                    value = req.getParameter(paramName);
-                                }
-                                if (value == null || value.isEmpty()) {
-                                    throw new IllegalArgumentException("Paramètre obligatoire manquant: " + paramName);
-                                }
-                                try {
-                                    args[i] = convertParameter(value, paramType);
-                                } catch (Exception e) {
-                                    throw new IllegalArgumentException("Impossible de convertir le paramètre '" + paramName + "' (valeur: '" + value + "') en type " + paramType.getSimpleName(), e);
-                                }
-                                continue;
+                            String value = null;
+                            if (urlParams != null && urlParams.containsKey(paramName)) {
+                                value = urlParams.get(paramName);
                             }
-                            // Objet complexe : construction automatique
+                            if (value == null || value.isEmpty()) {
+                                value = req.getParameter(paramName);
+                            }
+                            if (value == null || value.isEmpty()) {
+                                throw new IllegalArgumentException("Paramètre obligatoire manquant: " + paramName);
+                            }
                             try {
                                 args[i] = buildObjectFromRequest(paramType, parameter, req, "");
                             } catch (Exception e) {
