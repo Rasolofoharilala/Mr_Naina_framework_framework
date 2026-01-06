@@ -81,37 +81,40 @@ public class FrontServlet extends HttpServlet {
     }
 
     private void customServe(HttpServletRequest req, HttpServletResponse resp) throws IOException, ServletException {
-        // For non-static resources, decide here whether the requested path
-        // matches a @MethodeAnnotation and write the HTML response directly.
         String checkParam = req.getParameter("check");
         String path = (checkParam != null && !checkParam.isEmpty()) ? checkParam : req.getRequestURI().substring(req.getContextPath().length());
 
         Object o = getServletContext().getAttribute(ATTR_ANNOTATED_CLASSES);
-        boolean found = false;
-        Class<?> foundClassRef = null;
-        Method foundMethodRef = null;
+        List<RouteInfo> matchingRoutes = new ArrayList<>();
         Map<String, String> urlParams = null;
 
         if (o instanceof Set) {
             @SuppressWarnings("unchecked")
             Set<Class<?>> annotated = (Set<Class<?>>) o;
-            
-            // Collecter toutes les routes : exactes d'abord, puis avec paramètres
-            List<RouteInfo> exactRoutes = new ArrayList<>();
-            List<RouteInfo> paramRoutes = new ArrayList<>();
-            
             for (Class<?> cls : annotated) {
                 try {
                     for (Method m : cls.getDeclaredMethods()) {
-                        if (m.isAnnotationPresent(MethodeAnnotation.class)) {
-                            MethodeAnnotation ma = m.getAnnotation(MethodeAnnotation.class);
+                        if (m.isAnnotationPresent(annotation.MethodeAnnotation.class)) {
+                            annotation.MethodeAnnotation ma = m.getAnnotation(annotation.MethodeAnnotation.class);
                             String url = ma.value();
-                            if (url != null) {
-                                RouteInfo route = new RouteInfo(cls, m, url);
-                                if (url.contains("{")) {
-                                    paramRoutes.add(route);
-                                } else {
-                                    exactRoutes.add(route);
+                            // Par défaut, route ALL
+                            List<RouteInfo> routesForMethod = new ArrayList<>();
+                            routesForMethod.add(new RouteInfo(cls, m, url, "ALL"));
+                            // Si GetMapping, ajoute GET
+                            if (m.isAnnotationPresent(annotation.GetMapping.class)) {
+                                routesForMethod.add(new RouteInfo(cls, m, url, "GET"));
+                            }
+                            // Si PostMapping, ajoute POST
+                            if (m.isAnnotationPresent(annotation.PostMapping.class)) {
+                                routesForMethod.add(new RouteInfo(cls, m, url, "POST"));
+                            }
+                            // Ajoute toutes les routes pour cette méthode
+                            for (RouteInfo route : routesForMethod) {
+                                UrlMatcher matcher = new UrlMatcher(route.urlPattern);
+                                Map<String, String> params = matcher.extractParams(path);
+                                if (params != null) {
+                                    matchingRoutes.add(new RouteInfo(route.cls, route.method, route.urlPattern, route.httpMethod));
+                                    urlParams = params;
                                 }
                             }
                         }
@@ -120,30 +123,23 @@ public class FrontServlet extends HttpServlet {
                     // ignore problematic classes/methods
                 }
             }
-            
-            // Chercher d'abord dans les routes exactes
-            for (RouteInfo route : exactRoutes) {
-                if (route.urlPattern.equals(path)) {
-                    found = true;
-                    foundClassRef = route.cls;
-                    foundMethodRef = route.method;
-                    urlParams = new HashMap<>();
-                    break;
-                }
+        }
+
+        // Sélectionne la bonne méthode selon le type de requête
+        RouteInfo selectedRoute = null;
+        String reqMethod = req.getMethod();
+        // Priorité : GET/POST > ALL
+        for (RouteInfo route : matchingRoutes) {
+            if (route.httpMethod.equalsIgnoreCase(reqMethod)) {
+                selectedRoute = route;
+                break;
             }
-            
-            // Si pas trouvé, chercher dans les routes avec paramètres
-            if (!found) {
-                for (RouteInfo route : paramRoutes) {
-                    UrlMatcher matcher = new UrlMatcher(route.urlPattern);
-                    Map<String, String> params = matcher.extractParams(path);
-                    if (params != null) {
-                        found = true;
-                        foundClassRef = route.cls;
-                        foundMethodRef = route.method;
-                        urlParams = params;
-                        break;
-                    }
+        }
+        if (selectedRoute == null) {
+            for (RouteInfo route : matchingRoutes) {
+                if ("ALL".equals(route.httpMethod)) {
+                    selectedRoute = route;
+                    break;
                 }
             }
         }
@@ -151,13 +147,13 @@ public class FrontServlet extends HttpServlet {
         resp.setContentType("text/html;charset=UTF-8");
         try (PrintWriter out = resp.getWriter()) {
             out.println("<html><head><title>Test</title></head><body><h1>Check d'url </h1>");
-            if (found && foundClassRef != null && foundMethodRef != null) {
-                // Tenter d'invoquer la méthode trouvée
+            if (selectedRoute != null) {
                 try {
+                    Method foundMethodRef = selectedRoute.method;
+                    Class<?> foundClassRef = selectedRoute.cls;
                     foundMethodRef.setAccessible(true);
                     Object target = null;
                     if (!Modifier.isStatic(foundMethodRef.getModifiers())) {
-                        // créer une instance via constructeur sans argument
                         target = foundClassRef.getDeclaredConstructor().newInstance();
                     }
 
@@ -165,55 +161,49 @@ public class FrontServlet extends HttpServlet {
                     if (foundMethodRef.getParameterCount() == 0) {
                         result = foundMethodRef.invoke(target);
                     } else {
-                        // Préparer les arguments pour l'invocation
                         Class<?>[] paramTypes = foundMethodRef.getParameterTypes();
                         java.lang.reflect.Parameter[] parameters = foundMethodRef.getParameters();
                         Object[] args = new Object[paramTypes.length];
-                        
                         for (int i = 0; i < paramTypes.length; i++) {
                             Class<?> paramType = paramTypes[i];
-                            String paramName = parameters[i].getName();
-                            
-                            // Ignorer Map, List, tableaux - traités séparément
+                            java.lang.reflect.Parameter parameter = parameters[i];
                             if (Map.class.isAssignableFrom(paramType) || 
                                 List.class.isAssignableFrom(paramType) || 
                                 paramType.isArray()) {
                                 if (Map.class.isAssignableFrom(paramType)) {
-                                    args[i] = urlParams; // Passer les paramètres d'URL
+                                    args[i] = urlParams;
                                 }
                                 continue;
                             }
-                            
-                            // Chercher la valeur : d'abord dans urlParams, puis dans request params
+                            String paramName;
+                            if (parameter.isAnnotationPresent(RequestParam.class)) {
+                                RequestParam reqParam = parameter.getAnnotation(RequestParam.class);
+                                paramName = reqParam.value();
+                            } else {
+                                paramName = parameter.getName();
+                            }
                             String value = null;
                             if (urlParams != null && urlParams.containsKey(paramName)) {
                                 value = urlParams.get(paramName);
-                            } else {
+                            }
+                            if (value == null || value.isEmpty()) {
                                 value = req.getParameter(paramName);
                             }
-                            
-                            // Vérifier si le paramètre est obligatoire
                             if (value == null || value.isEmpty()) {
                                 throw new IllegalArgumentException("Paramètre obligatoire manquant: " + paramName);
                             }
-                            
-                            // Conversion de type
                             try {
                                 args[i] = convertParameter(value, paramType);
                             } catch (Exception e) {
                                 throw new IllegalArgumentException("Impossible de convertir le paramètre '" + paramName + "' (valeur: '" + value + "') en type " + paramType.getSimpleName(), e);
                             }
                         }
-                        
                         result = foundMethodRef.invoke(target, args);
                     }
-
-                    // Si la méthode retourne un ModelView, dispatcher vers la vue
                     if (result instanceof ModelView) {
                         ModelView modelView = (ModelView) result;
                         String view = modelView.getView();
                         if (view != null && !view.isEmpty()) {
-                            // Passer les données du ModelView vers la requête
                             Map<String, Object> data = modelView.getData();
                             if (data != null) {
                                 for (Map.Entry<String, Object> entry : data.entrySet()) {
@@ -228,13 +218,11 @@ public class FrontServlet extends HttpServlet {
                         out.println("<h2>Résultat</h2>");
                         out.println("<p>" + (String) result + "</p>");
                     } else {
-                        // fallback: infos de la méthode
                         out.println("<h2>Route trouvée</h2>");
                         out.println("<p>Classe: " + foundClassRef.getName() + "</p>");
                         out.println("<p>Méthode: " + foundMethodRef.getName() + "</p>");
                     }
                 } catch (IllegalArgumentException argError) {
-                    // Erreur de paramètre manquant ou invalide (400 Bad Request)
                     resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
                     out.println("<h2>400 - Paramètre invalide</h2>");
                     out.println("<p>" + argError.getMessage() + "</p>");
@@ -286,11 +274,13 @@ public class FrontServlet extends HttpServlet {
         Class<?> cls;
         Method method;
         String urlPattern;
-        
-        RouteInfo(Class<?> cls, Method method, String urlPattern) {
+        String httpMethod; // "ALL", "GET", "POST"
+
+        RouteInfo(Class<?> cls, Method method, String urlPattern, String httpMethod) {
             this.cls = cls;
             this.method = method;
             this.urlPattern = urlPattern;
+            this.httpMethod = httpMethod;
         }
     }
 
